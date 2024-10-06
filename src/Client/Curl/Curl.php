@@ -10,8 +10,6 @@ use Psr\Http\Message\StreamFactoryInterface;
 
 class Curl implements ClientInterface
 {
-
-    const USER_AGENT = 'Nltuning-Mailchimp-Client/1.0';
     const TIMEOUT = 10;
     const ENCODING = 'UTF-8';
 
@@ -36,6 +34,36 @@ class Curl implements ClientInterface
     {}
 
     /**
+     * Get user agent
+     * 
+     * @return string
+     */
+    protected function getUserAgent(): string
+    {
+        return 'Concept-Labs Curl Client/1.0 (PHP/' . PHP_VERSION . '; ' . php_uname('s') . ' ' . php_uname('r') . ')';
+    }
+
+    /**
+     * Get timeout
+     * 
+     * @return int
+     */
+    protected function getTimeout(): int
+    {
+        return self::TIMEOUT;
+    }
+
+    /**
+     * Get encoding
+     * 
+     * @return string
+     */
+    protected function getEncoding(): string
+    {
+        return self::ENCODING;
+    }
+
+    /**
      * {@inheritdoc}
      */
     public function sendRequest(RequestInterface $request): ResponseInterface
@@ -54,13 +82,13 @@ class Curl implements ClientInterface
          * Default options
          */
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($ch, CURLOPT_USERAGENT, static::USER_AGENT);
+        curl_setopt($ch, CURLOPT_USERAGENT, $this->getUserAgent());
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, static::TIMEOUT);
-        //curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_ENCODING, static::ENCODING);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $this->getTimeout());
+        curl_setopt($ch, CURLOPT_ENCODING, $this->getEncoding());
         curl_setopt($ch, CURLINFO_HEADER_OUT, true);
-
+        curl_setopt($ch, CURLOPT_HEADER, true); // To include headers in the output
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true); // Enable redirection
 
         /**
          * Method specific options
@@ -77,21 +105,38 @@ class Curl implements ClientInterface
                 curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');
                 curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$request->getBody());
                 break;
+            case 'PATCH':
+                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PATCH');
+                curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$request->getBody());
+                break;
             case 'DELETE':
                 curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'DELETE');
+                break;
+            default:
+                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$request->getBody());
                 break;
         }
 
         $responseText = curl_exec($ch);
 
-        $body = $this->getStreamFactory()->createStream($responseText);
-        $headers = $this->parseHeaders(curl_getinfo($ch, CURLINFO_HEADER_OUT));
+        // Handle curl errors
+        if ($responseText === false) {
+            throw new \RuntimeException('Curl error: ' . curl_error($ch), curl_errno($ch));
+        }
+
+        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $headers = substr($responseText, 0, $headerSize);
+        $body = substr($responseText, $headerSize);
+
+        $parsedHeaders = $this->parseHeaders($headers);
+        $bodyStream = $this->getStreamFactory()->createStream($body);
 
         $response = $this->getResponseFactory()
             ->createResponse(curl_getinfo($ch, CURLINFO_HTTP_CODE))
-            ->withBody($body);
+            ->withBody($bodyStream);
 
-        foreach ($headers as $header => $value) {
+        foreach ($parsedHeaders as $header => $value) {
             $response = $response->withAddedHeader($header, $value);
         }
 
@@ -100,17 +145,26 @@ class Curl implements ClientInterface
         return $response;
     }
 
+    /**
+     * Parse headers from a raw header string
+     *
+     * @param string $headers
+     * @return array
+     */
     protected function parseHeaders(string $headers): array
     {
-        $headers = explode("\r\n", $headers);
+        $lines = explode("\r\n", $headers);
         $result = [];
-        foreach ($headers as $header) {
-            if (empty($header) || strpos($header, ':') === false) {
+
+        foreach ($lines as $line) {
+            if (empty($line) || strpos($line, ':') === false) {
                 continue;
             }
-            $header = explode(':', $header);
-            $result[$header[0]] = $header[1];
+
+            [$header, $value] = explode(':', $line, 2);
+            $result[trim($header)] = trim($value);
         }
+
         return $result;
     }
 
@@ -133,5 +187,6 @@ class Curl implements ClientInterface
     {
         return clone $this->streamFactory;
     }
-
 }
+
+   
