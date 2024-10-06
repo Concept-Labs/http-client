@@ -2,7 +2,7 @@
     "name": "concept-labs/http-client",
     "description": "(C)oncept-Labs HTTP Client",
     "keywords": ["php", "http", "http-client", "psr-18"],
-    "license": "Apache 2.0",
+    "license": "Apache-2.0",
     "authors": [
         {
             "name": "Victor Galitsky",
