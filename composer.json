@@ -1,0 +1,29 @@
+{
+    "name": "concept-labs/http-client",
+    "description": "(C)oncept-Labs HTTP Client",
+    "keywords": ["php", "http", "http-client", "psr-18"],
+    "license": "Apache 2.0",
+    "authors": [
+        {
+            "name": "Victor Galitsky",
+            "email": "concept.galitsky@gmail.com"
+        }
+    ],
+    "require": {
+        "php": "^7.2|^7.4|^8.0|^8.2",
+        "concept-labs/di": "^1",
+        "psr/http-message": "^1",
+        "psr/http-factory": "^1",
+        "fig/http-message-util": "^1"
+    },
+    "autoload": {
+        "psr-4": {
+            "Concept\\Http\\": "src/"
+        }
+    },
+    "require-dev": {
+    },
+    "autoload-dev": {
+    }
+
+}
