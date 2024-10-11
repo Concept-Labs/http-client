@@ -7,151 +7,223 @@ use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseFactoryInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamFactoryInterface;
+use Concept\Http\Client\Exception\ClientException;
+use Concept\Http\Client\Exception\NetworkException;
+use Concept\Http\Client\Exception\ResponseException;
 
 class Curl implements ClientInterface
 {
     const TIMEOUT = 10;
     const ENCODING = 'UTF-8';
 
+    const DEFAULT_OPTIONS = [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HEADER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_TIMEOUT => self::TIMEOUT,
+        CURLOPT_ENCODING => self::ENCODING,
+    ];
+
     private ?ResponseFactoryInterface $responseFactory = null;
-    private ?StreamFactoryInterface $streamFactory = null;    
+    private ?StreamFactoryInterface $streamFactory = null;
 
     /**
      * Dependency injection
      */
-    public function __construct(ResponseFactoryInterface $response, StreamFactoryInterface $streamFactory)
+    public function __construct(ResponseFactoryInterface $responseFactory, StreamFactoryInterface $streamFactory)
     {
-        $this->responseFactory = $response;
+        $this->responseFactory = $responseFactory;
         $this->streamFactory = $streamFactory;
-
-        $this->init();
-    }
-
-    /**
-     * Initialization
-     */
-    protected function init()
-    {}
-
-    /**
-     * Get user agent
-     * 
-     * @return string
-     */
-    protected function getUserAgent(): string
-    {
-        return 'Concept-Labs Curl Client/1.0 (PHP/' . PHP_VERSION . '; ' . php_uname('s') . ' ' . php_uname('r') . ')';
-    }
-
-    /**
-     * Get timeout
-     * 
-     * @return int
-     */
-    protected function getTimeout(): int
-    {
-        return self::TIMEOUT;
-    }
-
-    /**
-     * Get encoding
-     * 
-     * @return string
-     */
-    protected function getEncoding(): string
-    {
-        return self::ENCODING;
     }
 
     /**
      * {@inheritdoc}
+     * 
+     * @param RequestInterface $request
+     * @param array $options
+     * 
+     * @throws \Psr\Http\Client\ClientExceptionInterface
+     * @throws ClientException
+     * @throws NetworkException
+     * @throws ResponseException
      */
-    public function sendRequest(RequestInterface $request): ResponseInterface
+    public function sendRequest(RequestInterface $request, array $options = []): ResponseInterface
     {
-        $method = (string)$request->getMethod();
+        $responses = $this->multiRequest([$request], $options);
 
-        $headers = [];
-        foreach ($request->getHeaders() as $name => $values) {
-            $headers[] = sprintf('%s: %s', $name, $request->getHeaderLine($name));
-        }
+        return reset($responses);
+    }
 
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, (string)$request->getUri());
 
-         /**
-         * Default options
-         */
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($ch, CURLOPT_USERAGENT, $this->getUserAgent());
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, $this->getTimeout());
-        curl_setopt($ch, CURLOPT_ENCODING, $this->getEncoding());
-        curl_setopt($ch, CURLINFO_HEADER_OUT, true);
-        curl_setopt($ch, CURLOPT_HEADER, true); // To include headers in the output
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true); // Enable redirection
-
+    /**
+     * @param RequestInterface[] $requests
+     * @param array|null $options
+     * 
+     * @return ResponseInterface[]
+     * 
+     * @throws \Psr\Http\Client\ClientExceptionInterface
+     * @throws ResponseException
+     */
+    protected function createResponse($ch, string $responseText): ResponseInterface
+    {
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         /**
-         * Method specific options
+         * @todo check httpCode or keep for service handling
          */
-        switch ($method) {
-            case 'GET':
-                curl_setopt($ch, CURLOPT_HTTPGET, true);
-                break;
-            case 'POST':
-                curl_setopt($ch, CURLOPT_POST, true);
-                curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$request->getBody());
-                break;
-            case 'PUT':
-                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');
-                curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$request->getBody());
-                break;
-            case 'PATCH':
-                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PATCH');
-                curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$request->getBody());
-                break;
-            case 'DELETE':
-                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'DELETE');
-                break;
-            default:
-                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-                curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$request->getBody());
-                break;
-        }
-
-        $responseText = curl_exec($ch);
-
-        // Handle curl errors
-        if ($responseText === false) {
-            throw new \RuntimeException('Curl error: ' . curl_error($ch), curl_errno($ch));
-        }
 
         $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
         $headers = substr($responseText, 0, $headerSize);
         $body = substr($responseText, $headerSize);
 
-        $parsedHeaders = $this->parseHeaders($headers);
-        $bodyStream = $this->getStreamFactory()->createStream($body);
+        $response = $this
+            ->getResponseFactory()
+            ->createResponse($httpCode)
+            ->withBody(
+                $this
+                    ->getStreamFactory()
+                    ->createStream($body)
+            );
 
-        $response = $this->getResponseFactory()
-            ->createResponse(curl_getinfo($ch, CURLINFO_HTTP_CODE))
-            ->withBody($bodyStream);
-
-        foreach ($parsedHeaders as $header => $value) {
+        foreach ($this->parseResponseHeaders($headers) as $header => $value) {
             $response = $response->withAddedHeader($header, $value);
         }
-
-        curl_close($ch);
 
         return $response;
     }
 
     /**
-     * Parse headers from a raw header string
-     *
-     * @param string $headers
-     * @return array
+     * @param RequestInterface[] $requests
+     * @param array|null $options
+     * 
+     * @return ResponseInterface[]
+     * 
+     * @throws \Psr\Http\Client\ClientExceptionInterface
+     * @throws ClientException
+     * @throws NetworkException
      */
-    protected function parseHeaders(string $headers): array
+    protected function multiRequest(array $requests, array $options = []): array
+    {
+        $handles = [];
+        $responses = [];
+        $multiHandle = curl_multi_init();
+
+        foreach ($requests as $key => $request) {
+            $handles[$key] = $this->initializeCurlHandle($request, $options);
+            curl_multi_add_handle($multiHandle, $handles[$key]);
+        }
+
+        $active = null;
+        do {
+            $status = curl_multi_exec($multiHandle, $active);
+            if ($active) {
+                curl_multi_select($multiHandle);
+            }
+        } while ($active && $status == CURLM_OK);
+
+        foreach ($handles as $key => $ch) {
+            if (false === $responseText = curl_multi_getcontent($ch)) {
+                $curlError = curl_error($ch);
+                $curlErrno = curl_errno($ch);
+                curl_multi_remove_handle($multiHandle, $ch);
+                curl_close($ch);
+
+                // Обробка помилок CURL
+                if ($curlErrno === CURLE_OPERATION_TIMEDOUT) {
+                    throw new NetworkException('Timeout occurred during request', $curlErrno);
+                }
+
+                throw new ClientException("Curl error: {$curlError}", $curlErrno);
+            }
+
+            // Створюємо відповідь з отриманого контенту
+            $responses[$key] = $this->createResponse($ch, $responseText);
+
+            curl_multi_remove_handle($multiHandle, $ch);
+            curl_close($ch);
+        }
+
+        curl_multi_close($multiHandle);
+
+        return $responses;
+    }
+
+    /**
+     * @param RequestInterface $request
+     * @param array $options
+     * 
+     * @return resource
+     */
+    protected function initializeCurlHandle(RequestInterface $request, array $options)
+    {
+        $options = $options + self::DEFAULT_OPTIONS;
+
+        $ch = curl_init();
+
+        curl_setopt($ch, CURLOPT_URL, (string)$request->getUri());
+        curl_setopt($ch, CURLOPT_USERAGENT, $this->getUserAgent());
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $this->parseRequestHeders($request));
+
+        foreach ($options as $option => $value) {
+            curl_setopt($ch, $option, $value);
+        }
+
+        $this->setCurlMethod($ch, $request);
+
+        return $ch;
+    }
+
+    /**
+     * @param RequestInterface $request
+     * 
+     * @return string[]
+     */
+    protected function parseRequestHeders(RequestInterface $request): array
+    {
+        $headers = [];
+        foreach ($request->getHeaders() as $name => $values) {
+            $headers[] = sprintf('%s: %s', $name, $request->getHeaderLine($name));
+        }
+
+        $headers[] = 'Content-Length: ' . $request->getBody()->getSize();
+        
+
+        return $headers;
+    }
+
+    /**
+     * @param resource $ch
+     * @param RequestInterface $request
+     */
+    protected function setCurlMethod($ch, RequestInterface $request): void
+    {
+        $method = strtoupper($request->getMethod());
+        switch ($method) {
+            case 'POST':
+                curl_setopt($ch, CURLOPT_POST, true);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$request->getBody());
+                break;
+            case 'PUT':
+                curl_setopt($ch, CURLOPT_PUT, true);
+                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$request->getBody());
+                break;
+            case 'PATCH':
+                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, (string)$request->getBody());
+            case 'DELETE':
+            case 'GET':
+            default:
+                curl_setopt($ch, CURLOPT_HTTPGET, true);
+                break;
+        }
+    }
+
+    /**
+     * @param string $headers
+     * 
+     * @return string[]
+     */
+    protected function parseResponseHeaders(string $headers): array
     {
         $lines = explode("\r\n", $headers);
         $result = [];
@@ -169,24 +241,26 @@ class Curl implements ClientInterface
     }
 
     /**
-     * Get response factory
-     * 
+     * @return string
+     */
+    protected function getUserAgent(): string
+    {
+        return 'Concept-Labs Curl Client/1.1 (PHP/' . PHP_VERSION . '; ' . php_uname('s') . ' ' . php_uname('r') . ')';
+    }
+
+    /**
      * @return ResponseFactoryInterface
      */
     protected function getResponseFactory(): ResponseFactoryInterface
     {
-        return clone $this->responseFactory;
+        return $this->responseFactory;
     }
 
     /**
-     * Get stream factory
-     * 
      * @return StreamFactoryInterface
      */
     protected function getStreamFactory(): StreamFactoryInterface
     {
-        return clone $this->streamFactory;
+        return $this->streamFactory;
     }
 }
-
-   
